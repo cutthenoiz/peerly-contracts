@@ -47,8 +47,10 @@ $ anvil
 
 ### Deploy
 
+Deploys `PeerlyEscrow`, reading `OWNER`, `FEE_RECIPIENT`, `FEE_BPS` from the environment (see `.env.example`):
+
 ```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+$ source .env && forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
 ```
 
 ### Cast
