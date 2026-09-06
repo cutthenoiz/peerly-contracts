@@ -14,17 +14,22 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// The owner only controls a capped protocol fee, an emergency pause, and a narrower
 /// deposit pause that blocks new offers while leaving existing ones takeable (wind-down
 /// path for a V2 migration). Neither pause blocks cancelOffer, so the owner can never
-/// trap escrowed funds.
+/// trap escrowed funds, and a fee change never applies to an offer already escrowed.
 contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    /// @dev `offerer`/`active`/`feeBps` share one slot (23 bytes), so snapshotting the
+    /// fee costs no extra storage - the struct is 5 slots, one fewer than an unpacked
+    /// layout. `feeBps` is fixed at creation so a later setFee can never change the
+    /// terms of an offer whose tokens are already escrowed.
     struct Offer {
         address offerer;
+        bool active;
+        uint16 feeBps;
         address tokenSell;
         uint256 amountSell;
         address tokenBuy;
         uint256 amountBuy;
-        bool active;
     }
 
     /// @notice Hard ceiling on the protocol fee. The owner can never set a higher fee.
@@ -47,7 +52,8 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
         address tokenSell,
         uint256 amountSell,
         address tokenBuy,
-        uint256 amountBuy
+        uint256 amountBuy,
+        uint16 feeBps
     );
     event OfferCancelled(uint256 indexed offerId);
     event OfferTaken(uint256 indexed offerId, address indexed taker, uint256 fee);
@@ -62,6 +68,7 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     error NotOfferer();
     error OfferNotActive();
     error DepositsPaused();
+    error SelfTake();
 
     constructor(address initialOwner, address initialFeeRecipient, uint16 initialFeeBps) Ownable(initialOwner) {
         if (initialFeeRecipient == address(0)) revert ZeroAddress();
@@ -90,16 +97,18 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
         if (received == 0) revert ZeroAmount();
 
         offerId = nextOfferId++;
+        uint16 snapshotFeeBps = feeBps;
         offers[offerId] = Offer({
             offerer: msg.sender,
+            active: true,
+            feeBps: snapshotFeeBps,
             tokenSell: tokenSell,
             amountSell: received,
             tokenBuy: tokenBuy,
-            amountBuy: amountBuy,
-            active: true
+            amountBuy: amountBuy
         });
 
-        emit OfferCreated(offerId, msg.sender, tokenSell, received, tokenBuy, amountBuy);
+        emit OfferCreated(offerId, msg.sender, tokenSell, received, tokenBuy, amountBuy, snapshotFeeBps);
     }
 
     /// @notice Cancel an active offer and reclaim the escrowed tokens.
@@ -112,6 +121,8 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
 
         offer.active = false;
         IERC20(offer.tokenSell).safeTransfer(offer.offerer, offer.amountSell);
+
+        emit OfferCancelled(offerId);
     }
 
     /// @notice Take an active offer, paying amountBuy of tokenBuy to receive amountSell of tokenSell.
@@ -122,10 +133,11 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     function takeOffer(uint256 offerId) external nonReentrant whenNotPaused {
         Offer storage offer = offers[offerId];
         if (!offer.active) revert OfferNotActive();
+        if (offer.offerer == msg.sender) revert SelfTake();
 
         offer.active = false;
 
-        uint256 fee = (offer.amountBuy * feeBps) / BPS_DENOMINATOR;
+        uint256 fee = (offer.amountBuy * offer.feeBps) / BPS_DENOMINATOR;
         IERC20(offer.tokenBuy).safeTransferFrom(msg.sender, offer.offerer, offer.amountBuy - fee);
         if (fee > 0) {
             IERC20(offer.tokenBuy).safeTransferFrom(msg.sender, feeRecipient, fee);
@@ -136,6 +148,9 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
         emit OfferTaken(offerId, msg.sender, fee);
     }
 
+    /// @notice Set the fee applied to offers created from now on.
+    /// @dev Does not affect offers already in escrow - each one settles at the fee
+    /// snapshotted when it was created.
     function setFee(uint16 newFeeBps) external onlyOwner {
         if (newFeeBps > MAX_FEE_BPS) revert FeeTooHigh();
         feeBps = newFeeBps;

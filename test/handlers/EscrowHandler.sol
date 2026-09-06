@@ -53,7 +53,7 @@ contract EscrowHandler is Test {
         vm.prank(offerer);
         uint256 offerId = escrow.createOffer(address(sellToken), amountSell, address(buyToken), amountBuy);
 
-        (,, uint256 recordedAmountSell,,,) = escrow.offers(offerId);
+        (,,,, uint256 recordedAmountSell,,) = escrow.offers(offerId);
         ghost_escrowedByToken[address(sellToken)] += recordedAmountSell;
         activeOfferIds.push(offerId);
     }
@@ -63,7 +63,7 @@ contract EscrowHandler is Test {
         uint256 idx = idSeed % activeOfferIds.length;
         uint256 offerId = activeOfferIds[idx];
 
-        (address offerer, address tokenSell, uint256 amountSell,,, bool active) = escrow.offers(offerId);
+        (address offerer, bool active,, address tokenSell, uint256 amountSell,,) = escrow.offers(offerId);
         if (!active) return;
 
         vm.prank(offerer);
@@ -78,10 +78,11 @@ contract EscrowHandler is Test {
         uint256 idx = idSeed % activeOfferIds.length;
         uint256 offerId = activeOfferIds[idx];
 
-        (, address tokenSell, uint256 amountSell,,, bool active) = escrow.offers(offerId);
+        (address offerer, bool active,, address tokenSell, uint256 amountSell,,) = escrow.offers(offerId);
         if (!active) return;
 
         address taker = _actor(actorSeed);
+        if (taker == offerer) return; // self-take reverts by design
         vm.prank(taker);
         escrow.takeOffer(offerId);
 
@@ -94,6 +95,15 @@ contract EscrowHandler is Test {
     function toggleDepositsPaused(uint256 seed) external {
         vm.prank(owner);
         escrow.setDepositsPaused(seed % 2 == 0);
+    }
+
+    /// @dev Churns the fee mid-run. Each offer settles at the fee snapshotted when it
+    /// was created, so no fee sequence can change what the escrow owes on tokenSell -
+    /// the solvency invariant must hold across arbitrary interleavings.
+    function setFee(uint256 seed) external {
+        uint16 newFee = uint16(bound(seed, 0, escrow.MAX_FEE_BPS())); // read before the prank
+        vm.prank(owner);
+        escrow.setFee(newFee);
     }
 
     function _removeActiveOffer(uint256 idx) internal {

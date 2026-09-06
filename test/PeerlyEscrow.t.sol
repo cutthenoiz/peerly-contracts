@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {PeerlyEscrow} from "../src/PeerlyEscrow.sol";
-import {MockERC20, FeeOnTransferERC20} from "./mocks/MockERC20.sol";
+import {MockERC20, FeeOnTransferERC20, RebasingERC20} from "./mocks/MockERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
@@ -45,7 +45,7 @@ contract PeerlyEscrowTest is Test {
 
         uint256 offerId = _createOffer(100 ether, 50 ether);
 
-        (address off, address tSell, uint256 aSell, address tBuy, uint256 aBuy, bool active) = escrow.offers(offerId);
+        (address off, bool active,, address tSell, uint256 aSell, address tBuy, uint256 aBuy) = escrow.offers(offerId);
         assertEq(off, offerer);
         assertEq(tSell, address(tokenA));
         assertEq(aSell, 100 ether);
@@ -94,7 +94,7 @@ contract PeerlyEscrowTest is Test {
         vm.prank(offerer);
         uint256 offerId = escrow.createOffer(address(deflationary), 100 ether, address(tokenB), 50 ether);
 
-        (,, uint256 aSell,,,) = escrow.offers(offerId);
+        (,,,, uint256 aSell,,) = escrow.offers(offerId);
         assertEq(aSell, 90 ether, "recorded amountSell must equal actual balance received, not requested");
         assertEq(deflationary.balanceOf(address(escrow)), 90 ether);
     }
@@ -108,7 +108,7 @@ contract PeerlyEscrowTest is Test {
         vm.prank(offerer);
         escrow.cancelOffer(offerId);
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
         assertEq(tokenA.balanceOf(offerer), offererBalBefore + 100 ether);
         assertEq(tokenA.balanceOf(address(escrow)), 0);
@@ -152,7 +152,7 @@ contract PeerlyEscrowTest is Test {
         vm.prank(offerer);
         escrow.cancelOffer(offerId); // must not revert: pause can never trap funds
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -176,7 +176,7 @@ contract PeerlyEscrowTest is Test {
         assertEq(tokenA.balanceOf(taker), takerABefore + 100 ether);
         assertEq(tokenA.balanceOf(address(escrow)), 0);
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -282,7 +282,7 @@ contract PeerlyEscrowTest is Test {
         vm.prank(taker);
         escrow.takeOffer(offerId);
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -364,7 +364,7 @@ contract PeerlyEscrowTest is Test {
         assertEq(tokenA.balanceOf(taker), takerABefore + 100 ether);
         assertEq(tokenA.balanceOf(address(escrow)), 0);
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -378,7 +378,7 @@ contract PeerlyEscrowTest is Test {
         vm.prank(offerer);
         escrow.cancelOffer(offerId); // must not revert: deposits pause can never trap funds
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertFalse(active);
         assertEq(tokenA.balanceOf(offerer), offererBalBefore + 100 ether);
         assertEq(tokenA.balanceOf(address(escrow)), 0);
@@ -398,7 +398,7 @@ contract PeerlyEscrowTest is Test {
         assertFalse(escrow.depositsPaused());
         uint256 offerId = _createOffer(100 ether, 50 ether);
 
-        (,,,,, bool active) = escrow.offers(offerId);
+        (, bool active,,,,,) = escrow.offers(offerId);
         assertTrue(active);
     }
 
@@ -568,9 +568,145 @@ contract PeerlyEscrowTest is Test {
             assertEq(tokenA.balanceOf(address(escrow)), 0);
         } else {
             uint256 offerId = escrow.createOffer(address(tokenA), amountSell, address(tokenB), amountBuy);
-            (,, uint256 aSell,,, bool active) = escrow.offers(offerId);
+            (, bool active,,, uint256 aSell,,) = escrow.offers(offerId);
             assertEq(aSell, amountSell);
             assertTrue(active);
         }
+    }
+
+    // ---------- fee snapshot ----------
+
+    /// @dev Regression test for the retroactive-fee attack: an offer created while the
+    /// fee was 0 must settle at 0 even if the owner raises the fee to the ceiling before
+    /// the take. Pre-fix this skimmed the full 5% of amountBuy from the offerer.
+    function test_takeOffer_usesFeeSnapshotFromCreation() public {
+        vm.prank(owner);
+        escrow.setFee(0);
+
+        uint256 offerId = _createOffer(100 ether, 50 ether); // offerer agreed to 0% fee
+
+        uint16 maxFee = escrow.MAX_FEE_BPS();
+        vm.prank(owner);
+        escrow.setFee(maxFee); // owner raises to 5% after escrow
+
+        uint256 offererBBefore = tokenB.balanceOf(offerer);
+        vm.prank(taker);
+        escrow.takeOffer(offerId);
+
+        assertEq(tokenB.balanceOf(feeRecipient), 0, "post-escrow fee raise must not apply retroactively");
+        assertEq(tokenB.balanceOf(offerer), offererBBefore + 50 ether);
+    }
+
+    function test_takeOffer_feeChangeAppliesToNewOffersOnly() public {
+        uint16 maxFee = escrow.MAX_FEE_BPS();
+        uint256 idOld = _createOffer(100 ether, 50 ether); // snapshotted at FEE_BPS (1%)
+
+        vm.prank(owner);
+        escrow.setFee(maxFee);
+
+        uint256 idNew = _createOffer(100 ether, 50 ether); // snapshotted at 5%
+
+        (,, uint16 feeOld,,,,) = escrow.offers(idOld);
+        (,, uint16 feeNew,,,,) = escrow.offers(idNew);
+        assertEq(feeOld, FEE_BPS, "existing offer keeps its snapshot");
+        assertEq(feeNew, maxFee, "new offer takes the current fee");
+
+        uint256 before = tokenB.balanceOf(feeRecipient);
+        vm.prank(taker);
+        escrow.takeOffer(idOld);
+        assertEq(tokenB.balanceOf(feeRecipient), before + (uint256(50 ether) * FEE_BPS) / 10_000);
+
+        before = tokenB.balanceOf(feeRecipient);
+        vm.prank(taker);
+        escrow.takeOffer(idNew);
+        assertEq(tokenB.balanceOf(feeRecipient), before + (uint256(50 ether) * maxFee) / 10_000);
+    }
+
+    function testFuzz_takeOffer_snapshotGovernsRegardlessOfLaterFee(
+        uint256 amountBuy,
+        uint16 feeAtCreate,
+        uint16 feeAtTake
+    ) public {
+        uint16 maxFee = escrow.MAX_FEE_BPS();
+        amountBuy = bound(amountBuy, 1, 1_000 ether);
+        feeAtCreate = uint16(bound(feeAtCreate, 0, maxFee));
+        feeAtTake = uint16(bound(feeAtTake, 0, maxFee));
+
+        vm.prank(owner);
+        escrow.setFee(feeAtCreate);
+
+        tokenA.mint(offerer, 100 ether);
+        tokenB.mint(taker, amountBuy);
+        uint256 offerId = _createOffer(100 ether, amountBuy);
+
+        vm.prank(owner);
+        escrow.setFee(feeAtTake);
+
+        uint256 offererBBefore = tokenB.balanceOf(offerer);
+        uint256 recipientBBefore = tokenB.balanceOf(feeRecipient);
+
+        vm.prank(taker);
+        escrow.takeOffer(offerId);
+
+        uint256 expectedFee = (amountBuy * feeAtCreate) / 10_000;
+        assertEq(tokenB.balanceOf(feeRecipient), recipientBBefore + expectedFee, "fee must follow the snapshot");
+        assertEq(tokenB.balanceOf(offerer), offererBBefore + amountBuy - expectedFee);
+    }
+
+    // ---------- self-take ----------
+
+    function test_takeOffer_revertsOnSelfTake() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+        tokenB.mint(offerer, 100 ether);
+        vm.prank(offerer);
+        tokenB.approve(address(escrow), type(uint256).max);
+
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.SelfTake.selector);
+        escrow.takeOffer(offerId);
+
+        (, bool active,,,,,) = escrow.offers(offerId);
+        assertTrue(active, "a rejected self-take must leave the offer intact");
+    }
+
+    // ---------- events ----------
+
+    function test_cancelOffer_emitsEvent() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+
+        vm.expectEmit(true, false, false, false, address(escrow));
+        emit PeerlyEscrow.OfferCancelled(offerId);
+        vm.prank(offerer);
+        escrow.cancelOffer(offerId);
+    }
+
+    // ---------- accepted token risk ----------
+
+    /// @dev Documents the one class the solvency invariant cannot cover: a tokenSell
+    /// whose balance shrinks after escrow (negative rebase, admin burn, blacklist-seize).
+    /// createOffer measures the delta on the way in, but nothing stops balanceOf(escrow)
+    /// dropping afterwards - the shortfall then lands on whoever exits last. Not fixable
+    /// without an owner-curated token allowlist; listing stays permissionless by design.
+    function test_rebasingToken_shortfallHitsTheLastExit() public {
+        RebasingERC20 rebasing = new RebasingERC20("Rebase", "RBS");
+        rebasing.mint(offerer, 1_000 ether);
+        vm.prank(offerer);
+        rebasing.approve(address(escrow), type(uint256).max);
+
+        vm.startPrank(offerer);
+        uint256 id0 = escrow.createOffer(address(rebasing), 100 ether, address(tokenB), 50 ether);
+        uint256 id1 = escrow.createOffer(address(rebasing), 100 ether, address(tokenB), 50 ether);
+        vm.stopPrank();
+        assertEq(rebasing.balanceOf(address(escrow)), 200 ether);
+
+        rebasing.rebaseDown(address(escrow), 5_000); // -50%: escrow now covers only one offer
+        assertEq(rebasing.balanceOf(address(escrow)), 100 ether);
+
+        vm.prank(offerer);
+        escrow.cancelOffer(id0); // first out is made whole
+
+        vm.prank(offerer);
+        vm.expectRevert(); // second out cannot be paid - the shortfall lands here
+        escrow.cancelOffer(id1);
     }
 }
