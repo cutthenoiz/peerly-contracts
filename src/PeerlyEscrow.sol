@@ -11,8 +11,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @notice P2P token escrow: an offerer locks tokenSell and names a tokenBuy price;
 /// a taker pays that price directly to the offerer and receives the escrowed tokens.
 /// @dev Trade logic (create/cancel/take) is not upgradeable - no proxy, no logic swap.
-/// The owner only controls a capped protocol fee and an emergency pause. Pause never
-/// blocks cancelOffer, so the owner can never trap escrowed funds.
+/// The owner only controls a capped protocol fee, an emergency pause, and a narrower
+/// deposit pause that blocks new offers while leaving existing ones takeable (wind-down
+/// path for a V2 migration). Neither pause blocks cancelOffer, so the owner can never
+/// trap escrowed funds.
 contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -35,6 +37,10 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     uint16 public feeBps;
     address public feeRecipient;
 
+    /// @notice When true, no new offers can be created. Existing offers stay takeable
+    /// and cancellable so escrow drains on its own (V2 migration path).
+    bool public depositsPaused;
+
     event OfferCreated(
         uint256 indexed offerId,
         address indexed offerer,
@@ -47,6 +53,7 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     event OfferTaken(uint256 indexed offerId, address indexed taker, uint256 fee);
     event FeeUpdated(uint16 feeBps);
     event FeeRecipientUpdated(address indexed feeRecipient);
+    event DepositsPausedSet(bool paused);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -54,6 +61,7 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
     error FeeTooHigh();
     error NotOfferer();
     error OfferNotActive();
+    error DepositsPaused();
 
     constructor(address initialOwner, address initialFeeRecipient, uint16 initialFeeBps) Ownable(initialOwner) {
         if (initialFeeRecipient == address(0)) revert ZeroAddress();
@@ -72,6 +80,7 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
         whenNotPaused
         returns (uint256 offerId)
     {
+        if (depositsPaused) revert DepositsPaused();
         if (amountSell == 0 || amountBuy == 0) revert ZeroAmount();
         if (tokenSell == tokenBuy) revert SameToken();
 
@@ -145,5 +154,12 @@ contract PeerlyEscrow is Ownable2Step, Pausable, ReentrancyGuard {
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Block or re-allow new offers without touching takeOffer/cancelOffer.
+    /// @dev Independent of the global pause: unpause() does not clear this flag.
+    function setDepositsPaused(bool paused) external onlyOwner {
+        depositsPaused = paused;
+        emit DepositsPausedSet(paused);
     }
 }

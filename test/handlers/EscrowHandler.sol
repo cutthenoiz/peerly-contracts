@@ -12,13 +12,15 @@ contract EscrowHandler is Test {
     MockERC20 public tokenA;
     MockERC20 public tokenB;
 
+    address public owner;
     address[] public actors;
     uint256[] public activeOfferIds;
 
     mapping(address => uint256) public ghost_escrowedByToken;
 
-    constructor(PeerlyEscrow escrow_, MockERC20 tokenA_, MockERC20 tokenB_) {
+    constructor(PeerlyEscrow escrow_, MockERC20 tokenA_, MockERC20 tokenB_, address owner_) {
         escrow = escrow_;
+        owner = owner_;
         tokenA = tokenA_;
         tokenB = tokenB_;
 
@@ -41,6 +43,8 @@ contract EscrowHandler is Test {
     function createOffer(uint256 actorSeed, bool sellIsA, uint256 amountSell, uint256 amountBuy) external {
         amountSell = bound(amountSell, 1, 1_000 ether);
         amountBuy = bound(amountBuy, 1, 1_000 ether);
+
+        if (escrow.depositsPaused()) return; // deposits closed: no new escrow to track
 
         address offerer = _actor(actorSeed);
         MockERC20 sellToken = sellIsA ? tokenA : tokenB;
@@ -83,6 +87,13 @@ contract EscrowHandler is Test {
 
         ghost_escrowedByToken[tokenSell] -= amountSell;
         _removeActiveOffer(idx);
+    }
+
+    /// @dev Flips the deposit switch mid-run so the solvency invariant is exercised
+    /// across arbitrary pause/unpause sequences interleaved with trading.
+    function toggleDepositsPaused(uint256 seed) external {
+        vm.prank(owner);
+        escrow.setDepositsPaused(seed % 2 == 0);
     }
 
     function _removeActiveOffer(uint256 idx) internal {

@@ -326,4 +326,251 @@ contract PeerlyEscrowTest is Test {
         assertEq(tokenB.balanceOf(feeRecipient), recipientBBefore + expectedFee);
         assertLe(expectedFee, amountBuy);
     }
+
+    // ---------- depositsPaused ----------
+
+    function test_setDepositsPaused_defaultsToFalse() public {
+        assertFalse(escrow.depositsPaused());
+        _createOffer(100 ether, 50 ether); // must not revert on a fresh deploy
+    }
+
+    function test_setDepositsPaused_blocksCreateOffer() public {
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        assertTrue(escrow.depositsPaused());
+
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+    }
+
+    function test_setDepositsPaused_allowsTakeOffer() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        uint256 offererBBefore = tokenB.balanceOf(offerer);
+        uint256 takerABefore = tokenA.balanceOf(taker);
+        uint256 recipientBBefore = tokenB.balanceOf(feeRecipient);
+
+        vm.prank(taker);
+        escrow.takeOffer(offerId); // deposits paused must never block settlement
+
+        uint256 expectedFee = (uint256(50 ether) * FEE_BPS) / 10_000;
+        assertEq(tokenB.balanceOf(offerer), offererBBefore + 50 ether - expectedFee);
+        assertEq(tokenB.balanceOf(feeRecipient), recipientBBefore + expectedFee);
+        assertEq(tokenA.balanceOf(taker), takerABefore + 100 ether);
+        assertEq(tokenA.balanceOf(address(escrow)), 0);
+
+        (,,,,, bool active) = escrow.offers(offerId);
+        assertFalse(active);
+    }
+
+    function test_setDepositsPaused_allowsCancelOffer() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+        uint256 offererBalBefore = tokenA.balanceOf(offerer);
+
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        vm.prank(offerer);
+        escrow.cancelOffer(offerId); // must not revert: deposits pause can never trap funds
+
+        (,,,,, bool active) = escrow.offers(offerId);
+        assertFalse(active);
+        assertEq(tokenA.balanceOf(offerer), offererBalBefore + 100 ether);
+        assertEq(tokenA.balanceOf(address(escrow)), 0);
+    }
+
+    function test_setDepositsPaused_isReversible() public {
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+
+        vm.prank(owner);
+        escrow.setDepositsPaused(false);
+
+        assertFalse(escrow.depositsPaused());
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+
+        (,,,,, bool active) = escrow.offers(offerId);
+        assertTrue(active);
+    }
+
+    function test_setDepositsPaused_emitsEvent() public {
+        vm.expectEmit(false, false, false, true, address(escrow));
+        emit PeerlyEscrow.DepositsPausedSet(true);
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        vm.expectEmit(false, false, false, true, address(escrow));
+        emit PeerlyEscrow.DepositsPausedSet(false);
+        vm.prank(owner);
+        escrow.setDepositsPaused(false);
+    }
+
+    function test_setDepositsPaused_revertsForNonOwner() public {
+        vm.prank(taker);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, taker));
+        escrow.setDepositsPaused(true);
+
+        vm.prank(offerer);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, offerer));
+        escrow.setDepositsPaused(true);
+
+        assertFalse(escrow.depositsPaused());
+    }
+
+    function test_setDepositsPaused_idempotent() public {
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(true);
+        escrow.setDepositsPaused(true);
+        vm.stopPrank();
+
+        assertTrue(escrow.depositsPaused());
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(false);
+        escrow.setDepositsPaused(false);
+        vm.stopPrank();
+
+        assertFalse(escrow.depositsPaused());
+        _createOffer(100 ether, 50 ether);
+    }
+
+    // ---------- depositsPaused x global pause ----------
+
+    function test_depositsPaused_andGlobalPause_bothBlockCreateOffer() public {
+        // deposits pause only
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+
+        // both: the whenNotPaused modifier runs before the body, so EnforcedPause wins
+        vm.prank(owner);
+        escrow.pause();
+        vm.prank(offerer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+
+        // global pause only
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(false);
+        vm.stopPrank();
+        vm.prank(offerer);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+    }
+
+    function test_globalUnpause_doesNotClearDepositsPaused() public {
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(true);
+        escrow.pause();
+        escrow.unpause();
+        vm.stopPrank();
+
+        assertFalse(escrow.paused());
+        assertTrue(escrow.depositsPaused(), "the two switches are independent");
+
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 100 ether, address(tokenB), 50 ether);
+    }
+
+    function test_depositsPaused_doesNotBlockCancelWhileGloballyPaused() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+        uint256 offererBalBefore = tokenA.balanceOf(offerer);
+
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(true);
+        escrow.pause();
+        vm.stopPrank();
+
+        vm.prank(offerer);
+        escrow.cancelOffer(offerId); // neither switch may ever trap escrowed funds
+
+        assertEq(tokenA.balanceOf(offerer), offererBalBefore + 100 ether);
+        assertEq(tokenA.balanceOf(address(escrow)), 0);
+    }
+
+    function test_depositsPaused_takeOfferStillBlockedByGlobalPause() public {
+        uint256 offerId = _createOffer(100 ether, 50 ether);
+
+        vm.startPrank(owner);
+        escrow.setDepositsPaused(true);
+        escrow.pause();
+        vm.stopPrank();
+
+        vm.prank(taker);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        escrow.takeOffer(offerId);
+    }
+
+    // ---------- V2 wind-down scenario ----------
+
+    function test_depositsPaused_existingOffersDrainToZero() public {
+        uint256 id0 = _createOffer(100 ether, 50 ether);
+        uint256 id1 = _createOffer(200 ether, 60 ether);
+        uint256 id2 = _createOffer(300 ether, 70 ether);
+        assertEq(tokenA.balanceOf(address(escrow)), 600 ether);
+
+        vm.prank(owner);
+        escrow.setDepositsPaused(true);
+
+        // no new liquidity can enter
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 1 ether, address(tokenB), 1 ether);
+
+        vm.prank(taker);
+        escrow.takeOffer(id0);
+        assertEq(tokenA.balanceOf(address(escrow)), 500 ether);
+
+        vm.startPrank(offerer);
+        escrow.cancelOffer(id1);
+        escrow.cancelOffer(id2);
+        vm.stopPrank();
+
+        assertEq(tokenA.balanceOf(address(escrow)), 0, "escrow must fully drain while deposits are paused");
+
+        // still closed after the drain
+        vm.prank(offerer);
+        vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+        escrow.createOffer(address(tokenA), 1 ether, address(tokenB), 1 ether);
+    }
+
+    // ---------- fuzz ----------
+
+    function testFuzz_setDepositsPaused_createOfferGatedByFlag(bool paused, uint256 amountSell, uint256 amountBuy)
+        public
+    {
+        amountSell = bound(amountSell, 1, 1_000 ether);
+        amountBuy = bound(amountBuy, 1, 1_000 ether);
+        tokenA.mint(offerer, amountSell);
+
+        vm.prank(owner);
+        escrow.setDepositsPaused(paused);
+
+        vm.prank(offerer);
+        if (paused) {
+            vm.expectRevert(PeerlyEscrow.DepositsPaused.selector);
+            escrow.createOffer(address(tokenA), amountSell, address(tokenB), amountBuy);
+            assertEq(tokenA.balanceOf(address(escrow)), 0);
+        } else {
+            uint256 offerId = escrow.createOffer(address(tokenA), amountSell, address(tokenB), amountBuy);
+            (,, uint256 aSell,,, bool active) = escrow.offers(offerId);
+            assertEq(aSell, amountSell);
+            assertTrue(active);
+        }
+    }
 }

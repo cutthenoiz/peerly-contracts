@@ -15,11 +15,12 @@ contract PeerlyEscrowInvariantTest is Test {
     EscrowHandler handler;
 
     function setUp() public {
-        escrow = new PeerlyEscrow(makeAddr("owner"), makeAddr("feeRecipient"), 100);
+        address owner = makeAddr("owner");
+        escrow = new PeerlyEscrow(owner, makeAddr("feeRecipient"), 100);
         tokenA = new MockERC20("TokenA", "TKA");
         tokenB = new MockERC20("TokenB", "TKB");
 
-        handler = new EscrowHandler(escrow, tokenA, tokenB);
+        handler = new EscrowHandler(escrow, tokenA, tokenB, owner);
         targetContract(address(handler));
     }
 
