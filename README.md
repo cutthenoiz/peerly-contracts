@@ -53,6 +53,14 @@ Deploys `PeerlyEscrow`, reading `OWNER`, `FEE_RECIPIENT`, `FEE_BPS` from the env
 $ source .env && forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
 ```
 
+### Pause / Unpause
+
+Owner-only admin actions on a deployed `PeerlyEscrow`, reading `ESCROW` (deployed address) and `ACTION` (`pause`, `unpause`, `pauseDeposits`, or `unpauseDeposits`) from the environment:
+
+```shell
+$ ESCROW=<escrow_address> ACTION=pause forge script script/Pause.s.sol:Pause --rpc-url "$RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
+```
+
 ### Cast
 
 ```shell
